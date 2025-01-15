@@ -241,12 +241,14 @@ void forwardNetwork(const NeuralNetwork *network,
     }
 
     // 3) The final layer’s output is in network->activations[numLayers].
-    //    If the caller wants it in 'output', we can copy or just do a pointer assignment
+
+    if (output != nullptr)
     {
         float *finalOutput = network->activations[numLayers];
         int finalSize = network->layers[numLayers - 1].outputSize;
-        // If user wants a separate buffer 'output' on GPU:
-        checkCudaError(cudaMemcpy(output, finalOutput,
+
+        checkCudaError(cudaMemcpy(output,
+                                  finalOutput,
                                   batchSize * finalSize * sizeof(float),
                                   cudaMemcpyDeviceToDevice),
                        "cudaMemcpy final layer output");
