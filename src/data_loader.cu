@@ -53,7 +53,13 @@ void loadMNISTCSV(
             continue;
         }
         float labelValue = std::stof(token);
-        host_labels.push_back(labelValue);
+        int digit = static_cast<int>(labelValue);
+
+        // expand to one-hot of length 10
+        for (int c = 0; c < 10; c++)
+        {
+            host_labels.push_back((c == digit) ? 1.f : 0.f);
+        }
 
         // 2) Parse 784 pixels
         for (int i = 0; i < 784; i++)
@@ -80,10 +86,9 @@ void loadMNISTCSV(
     //   Images: numSamples * 784
     //   Labels: numSamples
     size_t imagesSize = numSamples * 784 * sizeof(float);
-    size_t labelsSize = numSamples * sizeof(float);
-
+    size_t labelsSize = numSamples * 10 * sizeof(float); // NEW: 10 floats/label
+    
     cudaError_t err;
-
     err = cudaMalloc((void **)d_images, imagesSize);
     if (err != cudaSuccess)
     {
