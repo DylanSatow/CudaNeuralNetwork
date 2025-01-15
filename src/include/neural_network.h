@@ -17,11 +17,13 @@ typedef struct
     float *d_biases;
 } Layer;
 
+// In your NeuralNetwork structure, add something like:
 typedef struct
 {
-    int numLayers;
     Layer *layers;
+    int numLayers;
     float learningRate;
+    float **activations; // an array of pointers to device memory
 } NeuralNetwork;
 
 void initLayer(Layer *layer, int inputSize, int outputSize);
@@ -30,3 +32,10 @@ void freeLayer(Layer *layer);
 void freeNetwork(NeuralNetwork *network);
 void forwardLayer(const Layer *layer, const float *input, float *output, int batchSize);
 void forwardNetwork(const NeuralNetwork *network, const float *input, float *output, int batchSize);
+
+void trainNetwork(NeuralNetwork *network,
+                  const float *d_trainImages, // all training images on GPU
+                  const float *d_trainLabels, // all training labels on GPU (one-hot or not)
+                  int numSamples,
+                  int batchSize,
+                  int epochs);

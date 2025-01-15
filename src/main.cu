@@ -1,69 +1,116 @@
-// main.cu
-#include <iostream>
-#include "include/neural_network.h"
-#include "include/utils.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+#include "include/neural_network.h" // your header for the network interface
+#include "include/utils.h"          // assumed utilities (checkCudaError, etc.)
+#include "include/data_loader.h"
 
-extern void loadMNISTCSV(const std::string &csvPath,
-                         float **d_images,
-                         float **d_labels,
-                         int &numSamples);
-
-int main(int argc, char **argv)
+/**
+ * A small helper to print a float array from host memory
+ */
+void printArray(const float *arr, int size, const char *name)
 {
-    if (argc < 2)
+    printf("%s = [", name);
+    for (int i = 0; i < size; i++)
     {
-        std::cerr << "Usage: " << argv[0] << " <mnist_csv_path>" << std::endl;
-        return 1;
+        printf("%.4f", arr[i]);
+        if (i < size - 1)
+            printf(", ");
     }
-    std::string csvPath = argv[1];
+    printf("]\n");
+}
 
-    // 1) Load MNIST CSV
-    float *d_images = nullptr;
-    float *d_labels = nullptr;
-    int numSamples = 0;
+int main()
+{
+    // ------------------------------------------------
+    // 1) Prepare some dummy data for XOR learning
+    // ------------------------------------------------
+    // XOR truth table (4 samples)
+    //   Inputs (2D):
+    //      (0,0) -> 0
+    //      (0,1) -> 1
+    //      (1,0) -> 1
+    //      (1,1) -> 0
+    float h_trainInputs[8] = {0.f, 0.f, 0.f, 1.f, 1.f, 0.f, 1.f, 1.f};
+    float h_trainLabels[4] = {0.f, 1.f, 1.f, 0.f};
+    const int numSamples = 4;
+    const int inputSize = 2;  // each sample has 2 inputs
+    const int outputSize = 1; // we want 1 output (for XOR)
 
-    loadMNISTCSV(csvPath, &d_images, &d_labels, numSamples);
+    // Copy them to device
+    float *d_inputs = nullptr, *d_labels = nullptr;
+    checkCudaError(cudaMalloc(&d_inputs, numSamples * inputSize * sizeof(float)), "cudaMalloc d_inputs");
+    checkCudaError(cudaMalloc(&d_labels, numSamples * outputSize * sizeof(float)), "cudaMalloc d_labels");
+    checkCudaError(cudaMemcpy(d_inputs, h_trainInputs, numSamples * inputSize * sizeof(float),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy h_trainInputs -> d_inputs");
+    checkCudaError(cudaMemcpy(d_labels, h_trainLabels, numSamples * outputSize * sizeof(float),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy h_trainLabels -> d_labels");
 
-    std::cout << "MNIST loaded. numSamples = " << numSamples << std::endl;
+    // ------------------------------------------------
+    // 2) Define a small network architecture
+    // ------------------------------------------------
+    // For example, 2 -> 4 -> 1
+    // layerSizes[0] = inputSize=2
+    // layerSizes[1] = hiddenSize=4
+    // layerSizes[2] = outputSize=1
+    int layerSizes[] = {2, 4, 1};
+    const int numLayers = 3; // This includes input layer, hidden layer(s), and output layer
+    float learningRate = 0.1f;
 
-    // 2) Build a small network, e.g. [784 -> 128 -> 10]
-    int layerSizes[3] = {784, 128, 10};
-    NeuralNetwork net;
-    initNetwork(&net, layerSizes, 3, /*learningRate=*/0.01f);
+    NeuralNetwork network;
+    initNetwork(&network, layerSizes, numLayers, learningRate);
 
-    // 3) Forward pass for a small batch, say batchSize = 4 for quick debug
+    // ------------------------------------------------
+    // 3) Train the network
+    // ------------------------------------------------
+    // We'll train in a single batch of size=4 (entire XOR set).
+    // For real tasks, you'd typically have many batches, etc.
     int batchSize = 4;
-    if (batchSize > numSamples)
-        batchSize = numSamples; // safeguard
+    int epochs = 1000;
 
-    // Allocate device memory for the output of shape (batchSize x 10)
+    printf("\n[INFO] Training the network on XOR...\n");
+    trainNetwork(&network, d_inputs, d_labels, numSamples, batchSize, epochs);
+
+    // ------------------------------------------------
+    // 4) Test the trained network (forward pass)
+    // ------------------------------------------------
+    // We re-run the same 4 inputs (d_inputs), see if we get close to the XOR truth
+    //  (which is {0,1,1,0}).
+
+    // Create a device buffer for the outputs
     float *d_output = nullptr;
-    cudaMalloc(&d_output, batchSize * layerSizes[2] * sizeof(float));
+    checkCudaError(cudaMalloc(&d_output, batchSize * outputSize * sizeof(float)),
+                   "cudaMalloc d_output");
 
-    // Forward pass: d_images -> net -> d_output
-    forwardNetwork(&net, d_images, d_output, batchSize);
+    // Forward pass
+    forwardNetwork(&network, d_inputs, d_output, batchSize);
 
-    // 4) Copy output to host & print first few logits
-    float *h_output = (float *)malloc(batchSize * layerSizes[2] * sizeof(float));
-    cudaMemcpy(h_output, d_output, batchSize * layerSizes[2] * sizeof(float), cudaMemcpyDeviceToHost);
+    // Copy the outputs back to host
+    float h_output[4];
+    checkCudaError(cudaMemcpy(h_output, d_output, batchSize * outputSize * sizeof(float),
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy d_output -> h_output");
 
-    // Print partial results
-    for (int b = 0; b < batchSize; b++)
+    // Print the results
+    printf("\nTrained Network Output (after %d epochs):\n", epochs);
+    for (int i = 0; i < numSamples; i++)
     {
-        std::cout << "Sample #" << b << " output logits: ";
-        for (int j = 0; j < layerSizes[2]; j++)
-        {
-            std::cout << h_output[b * layerSizes[2] + j] << " ";
-        }
-        std::cout << std::endl;
+        printf("Input = (%.1f, %.1f)  ->  Pred = %.4f  (Target = %.1f)\n",
+               h_trainInputs[2 * i], h_trainInputs[2 * i + 1],
+               h_output[i],
+               h_trainLabels[i]);
     }
 
-    // Cleanup
-    freeNetwork(&net);
-    cudaFree(d_output);
-    free(h_output);
-    cudaFree(d_images);
+    // ------------------------------------------------
+    // 5) Cleanup
+    // ------------------------------------------------
+    cudaFree(d_inputs);
     cudaFree(d_labels);
+    cudaFree(d_output);
 
+    freeNetwork(&network);
+    cudaDeviceReset();
     return 0;
 }

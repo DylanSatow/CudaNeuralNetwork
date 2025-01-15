@@ -72,15 +72,12 @@ void initLayer(Layer *layer, int inputSize, int outputSize) {
     free(h_biases);
 }
 
-void initNetwork(NeuralNetwork *network, int *layerSizes, int numLayers, float learningRate) {
-    // Typically, numLayers might be the count of the *layerSizes array* - 1 if it includes input.
-    // E.g.: layerSizes = [784, 128, 10] => numLayers = 2 fully-connected layers.
-    // We'll interpret numLayers as "number of layers" in the sense of how many times we call initLayer.
-
-    network->numLayers = numLayers - 1; // e.g. if layerSizes has 3 elements => 2 layers
+void initNetwork(NeuralNetwork *network, int *layerSizes, int numLayers, float learningRate)
+{
+    network->numLayers = numLayers - 1;
     network->learningRate = learningRate;
 
-    // Allocate host array for the layers
+    // Allocate host array for Layers
     network->layers = (Layer *)malloc(network->numLayers * sizeof(Layer));
     if (!network->layers)
     {
@@ -89,14 +86,22 @@ void initNetwork(NeuralNetwork *network, int *layerSizes, int numLayers, float l
     }
 
     // Initialize each layer
-    for (int i = 0; i < network->numLayers; i++) {
-        int inSize = layerSizes[i];
-        int outSize = layerSizes[i + 1];
-
-        initLayer(&(network->layers[i]), inSize, outSize);
+    for (int i = 0; i < network->numLayers; i++)
+    {
+        initLayer(&(network->layers[i]), layerSizes[i], layerSizes[i + 1]);
     }
 
-    // Print Summary Info
+    // Allocate space for storing intermediate activations
+    // We have network->numLayers + 1 arrays: index 0 for the original input, then 1..numLayers for each layer’s output
+    network->activations = (float **)malloc((network->numLayers + 1) * sizeof(float *));
+    if (!network->activations)
+    {
+        fprintf(stderr, "Host memory allocation failed for activations pointers\n");
+        exit(EXIT_FAILURE);
+    }
+    // We only allocate the actual memory for each forward call,
+    // or we can do it here if we know a fixed batchSize in advance.
+
     printf("[initNetwork] Created %d layers.\n", network->numLayers);
     for (int i = 0; i < network->numLayers; i++)
     {
@@ -206,128 +211,299 @@ void forwardNetwork(const NeuralNetwork *network,
                     float *output,
                     int batchSize)
 {
-    // We assume 'input' is on GPU of shape (batchSize x layerSizes[0])
-    // We want 'output' on GPU of shape (batchSize x layerSizes[last])
-
     const int numLayers = network->numLayers;
-
-    // If there's no layer, just copy input to output (edge case)
     if (numLayers == 0)
     {
-        // Possibly just do memcpy if same shape
+        // edge case: no layers => nothing to do
         return;
     }
 
-    // We’ll use a double-buffer approach for intermediate results:
-    //   bufferA and bufferB both allocated up to the max layer-size needed.
-    // We'll flip between them as we go forward layer by layer.
-    // So we never do extra malloc/free inside the loop.
+    // 1) Allocate GPU buffers for each layer's output
+    //    network->activations[0] is the input
+    network->activations[0] = (float *)input; // we do NOT own this memory; user provided
 
-    // 1) Determine the largest possible output size among all layers
-    int maxOutputNeurons = 0;
     for (int i = 0; i < numLayers; i++)
     {
-        if (network->layers[i].outputSize > maxOutputNeurons)
-            maxOutputNeurons = network->layers[i].outputSize;
+        int outSize = network->layers[i].outputSize;
+        size_t bytes = batchSize * outSize * sizeof(float);
+
+        // Allocate a buffer for this layer’s output
+        checkCudaError(cudaMalloc(&(network->activations[i + 1]), bytes), "cudaMalloc layer output");
     }
-    size_t maxBytes = maxOutputNeurons * batchSize * sizeof(float);
-
-    // 2) Allocate two temp buffers
-    float *bufferA = nullptr;
-    float *bufferB = nullptr;
-    checkCudaError(cudaMalloc(&bufferA, maxBytes), "cudaMalloc bufferA");
-    checkCudaError(cudaMalloc(&bufferB, maxBytes), "cudaMalloc bufferB");
-
-    // currentInput points to the input buffer for the current layer
-    // currentOutput points to the output buffer for the current layer
-    const float *currentInput = input; // first layer sees the user input
-    float *currentOutput = bufferA;    // it can write to bufferA initially
-
+    // 2) Forward pass layer by layer
     for (int i = 0; i < numLayers; i++)
     {
         const Layer *layer = &(network->layers[i]);
+        const float *currentInput = network->activations[i];
+        float *currentOutput = network->activations[i + 1];
 
-        // If this is the last layer, we'll write the result directly into "output"
-        // to avoid an extra copy.
-        if (i == numLayers - 1)
-            currentOutput = output;
-
-        // Forward pass for the i-th layer
         forwardLayer(layer, currentInput, currentOutput, batchSize);
-
-        // Prepare for next iteration:
-        // swap buffers so next layer reads from what we just wrote
-        if (i < numLayers - 1)
-        {
-            // The next layer's input will be the current layer's output
-            // Flip the pointer so we don't keep overwriting the same buffer
-            if (currentOutput == bufferA)
-            {
-                currentInput = bufferA;
-                currentOutput = bufferB;
-            }
-            else
-            {
-                currentInput = bufferB;
-                currentOutput = bufferA;
-            }
-        }
     }
 
-    // Free temp buffers
-    checkCudaError(cudaFree(bufferA), "cudaFree bufferA");
-    checkCudaError(cudaFree(bufferB), "cudaFree bufferB");
+    // 3) The final layer’s output is in network->activations[numLayers].
+    //    If the caller wants it in 'output', we can copy or just do a pointer assignment
+    {
+        float *finalOutput = network->activations[numLayers];
+        int finalSize = network->layers[numLayers - 1].outputSize;
+        // If user wants a separate buffer 'output' on GPU:
+        checkCudaError(cudaMemcpy(output, finalOutput,
+                                  batchSize * finalSize * sizeof(float),
+                                  cudaMemcpyDeviceToDevice),
+                       "cudaMemcpy final layer output");
+    }
 }
 
-// /* --------------------- *
-//  *  Backward Pass        *
-//  * --------------------- */
-// void backwardLayer(Layer *layer,
-//                    const float *inputActivations,
-//                    const float *outputGradients,
-//                    float *inputGradients,
-//                    int batchSize)
-// {
-//     // compute d_weights, d_biases, inputGradients
-// }
+/* --------------------- *
+ *  Backward Pass        *
+ * --------------------- */
 
-// void backwardNetwork(Network *network,
-//                      const float *input,
-//                      const float *target,
-//                      int batchSize)
-// {
-//     // compute dLoss/dOutput
-//     // for each layer in reverse order:
-//     //    backwardLayer(...)
-// }
+__global__ void computeOutputGradientKernel(const float *pred,
+                                            const float *target,
+                                            float *dOut,
+                                            int size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size)
+    {
+        dOut[idx] = (pred[idx] - target[idx]); // dLoss/dPred for MSE
+    }
+}
 
-// /* --------------------- *
-//  *  Update Parameters    *
-//  * --------------------- */
-// __global__ void updateParametersKernel(float *params, const float *grads, float lr, int size)
-// {
-//     // subtract lr * grad
-// }
+__global__ void backwardLayerKernel(const float *inputActivations,  // (batchSize, inputSize)
+                                    const float *outputActivations, // (batchSize, outputSize) after ReLU
+                                    const float *outputGradients,   // (batchSize, outputSize) dL/dY
+                                    float *d_weights,               // (inputSize, outputSize)
+                                    float *d_biases,                // (outputSize)
+                                    float *inputGradients,          // (batchSize, inputSize) dL/dX
+                                    const float *weights,           // (inputSize, outputSize)
+                                    int inputSize,
+                                    int outputSize,
+                                    int batchSize)
+{
+    int outNeuron = blockIdx.x * blockDim.x + threadIdx.x; // which output neuron
+    int sample = blockIdx.y * blockDim.y + threadIdx.y;    // which batch sample
+    if (outNeuron < outputSize && sample < batchSize)
+    {
+        // Compute dZ = dY * ReLU'(Z).  Z>0 iff outputActivations>0.
+        // We'll get the post-activation from 'outputActivations'.
+        float dY = outputGradients[sample * outputSize + outNeuron];
+        float a = outputActivations[sample * outputSize + outNeuron];
+        float dZ = (a > 0.0f) ? dY : 0.0f;
 
-// void updateLayerParameters(Layer *layer, float lr)
-// {
-//     // Launch updateParametersKernel for weights, biases
-// }
+        // Accumulate bias gradient
+        atomicAdd(&d_biases[outNeuron], dZ);
 
-// void updateNetworkParameters(Network *network)
-// {
-//     // For each layer, call updateLayerParameters
-// }
+        // For each input neuron, update d_weights and inputGradients
+        for (int inNeuron = 0; inNeuron < inputSize; inNeuron++)
+        {
+            float xval = inputActivations[sample * inputSize + inNeuron];
+            // d_weight = xval * dZ
+            atomicAdd(&d_weights[inNeuron * outputSize + outNeuron], xval * dZ);
 
-// /* --------------------- *
-//  *  Training (Optional)  *
-//  * --------------------- */
-// void trainNetwork(Network *network,
-//                   const float *d_trainImages,
-//                   const float *d_trainLabels,
-//                   int numSamples,
-//                   int batchSize,
-//                   int epochs)
-// {
-//     // implement training loop
-// }
+            // dX = sum_j( dZ_j * W_{inNeuron, j} )
+            // but here j is just outNeuron in this loop
+            float wval = weights[inNeuron * outputSize + outNeuron];
+            atomicAdd(&inputGradients[sample * inputSize + inNeuron], dZ * wval);
+        }
+    }
+}
+
+void backwardLayer(Layer *layer,
+                   const float *inputActivations,  // a^{l-1}
+                   const float *outputActivations, // a^l
+                   const float *outputGradients,   // dL/d(a^l)
+                   float *inputGradients,          // dL/d(a^{l-1})
+                   int batchSize)
+{
+    // First, zero out the d_weights, d_biases in this layer
+    checkCudaError(cudaMemset(layer->d_weights, 0,
+                              layer->inputSize * layer->outputSize * sizeof(float)),
+                   "cudaMemset d_weights");
+    checkCudaError(cudaMemset(layer->d_biases, 0,
+                              layer->outputSize * sizeof(float)),
+                   "cudaMemset d_biases");
+
+    // Also zero out inputGradients (the dL/dX) we will produce
+    checkCudaError(cudaMemset(inputGradients, 0,
+                              batchSize * layer->inputSize * sizeof(float)),
+                   "cudaMemset inputGradients");
+
+    // Configure the kernel
+    dim3 blockDim(16, 16);
+    dim3 gridDim((layer->outputSize + blockDim.x - 1) / blockDim.x,
+                 (batchSize + blockDim.y - 1) / blockDim.y);
+
+    // Launch
+    backwardLayerKernel<<<gridDim, blockDim>>>(
+        inputActivations,
+        outputActivations,
+        outputGradients,
+        layer->d_weights,
+        layer->d_biases,
+        inputGradients,
+        layer->weights,
+        layer->inputSize,
+        layer->outputSize,
+        batchSize);
+    checkCudaError(cudaGetLastError(), "backwardLayerKernel launch");
+    checkCudaError(cudaDeviceSynchronize(), "backwardLayerKernel sync");
+}
+
+void backwardNetwork(NeuralNetwork *network,
+                     const float *target, // (batchSize x lastLayerSize)
+                     int batchSize)
+{
+    int L = network->numLayers;
+    if (L == 0)
+        return;
+
+    // 1) Allocate device memory for gradient wrt each layer's activation
+    float **gradBuffer = (float **)malloc((L + 1) * sizeof(float *));
+    for (int i = 0; i <= L; i++)
+    {
+        // The i-th activation has shape (batchSize, layerSizes[i])
+        int size = (i == 0) ? network->layers[0].inputSize
+                            : network->layers[i - 1].outputSize;
+        checkCudaError(cudaMalloc(&gradBuffer[i], batchSize * size * sizeof(float)),
+                       "cudaMalloc gradBuffer");
+    }
+
+    // 2) Compute dLoss/dOutput for the last layer
+    {
+        // last layer activation is network->activations[L]
+        int finalSize = network->layers[L - 1].outputSize;
+        int total = batchSize * finalSize;
+
+        dim3 blockDim(256);
+        dim3 gridDim((total + blockDim.x - 1) / blockDim.x);
+        computeOutputGradientKernel<<<gridDim, blockDim>>>(
+            network->activations[L], // pred
+            target,                  // target
+            gradBuffer[L],           // dLoss/dPred
+            total);
+        checkCudaError(cudaGetLastError(), "computeOutputGradientKernel launch");
+        checkCudaError(cudaDeviceSynchronize(), "computeOutputGradientKernel sync");
+    }
+
+    // 3) Now go in reverse order of layers
+    for (int i = L - 1; i >= 0; i--)
+    {
+        Layer *layer = &network->layers[i];
+
+        // activation of i-th layer input: network->activations[i]
+        // activation of i-th layer output: network->activations[i+1]
+        // dL/d(a^l) is in gradBuffer[i+1]
+        // we want to produce dL/d(a^{l-1}) in gradBuffer[i]
+
+        backwardLayer(layer,
+                      network->activations[i],     // inputActivations
+                      network->activations[i + 1], // outputActivations
+                      gradBuffer[i + 1],           // outputGradients
+                      gradBuffer[i],               // inputGradients
+                      batchSize);
+    }
+
+    // 4) We now have layer->d_weights, layer->d_biases for each layer.
+    //    Next step is to update them using the chosen learning rate.
+    //    (We'll do that in updateNetworkParameters().)
+
+    // Cleanup
+    for (int i = 0; i <= L; i++)
+    {
+        cudaFree(gradBuffer[i]);
+    }
+    free(gradBuffer);
+}
+
+__global__ void updateParametersKernel(float *params,
+                                       const float *grads,
+                                       float lr,
+                                       int size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size)
+    {
+        params[idx] -= lr * grads[idx];
+    }
+}
+
+void updateLayerParameters(Layer *layer, float lr)
+{
+    // weights
+    {
+        int size = layer->inputSize * layer->outputSize;
+        dim3 blockDim(256);
+        dim3 gridDim((size + blockDim.x - 1) / blockDim.x);
+        updateParametersKernel<<<gridDim, blockDim>>>(
+            layer->weights,
+            layer->d_weights,
+            lr,
+            size);
+        checkCudaError(cudaGetLastError(), "updateParametersKernel for weights");
+        checkCudaError(cudaDeviceSynchronize(), "updateParametersKernel for weights sync");
+    }
+    // biases
+    {
+        int size = layer->outputSize;
+        dim3 blockDim(256);
+        dim3 gridDim((size + blockDim.x - 1) / blockDim.x);
+        updateParametersKernel<<<gridDim, blockDim>>>(
+            layer->biases,
+            layer->d_biases,
+            lr,
+            size);
+        checkCudaError(cudaGetLastError(), "updateParametersKernel for biases");
+        checkCudaError(cudaDeviceSynchronize(), "updateParametersKernel for biases sync");
+    }
+}
+
+void updateNetworkParameters(NeuralNetwork *network)
+{
+    for (int i = 0; i < network->numLayers; i++)
+    {
+        updateLayerParameters(&network->layers[i], network->learningRate);
+    }
+}
+
+void trainNetwork(NeuralNetwork *network,
+                  const float *d_trainImages, // all training images on GPU
+                  const float *d_trainLabels, // all training labels on GPU (one-hot or not)
+                  int numSamples,
+                  int batchSize,
+                  int epochs)
+{
+    int stepsPerEpoch = numSamples / batchSize;
+
+    for (int e = 0; e < epochs; e++)
+    {
+        float epochLoss = 0.0f; // accumulate if you like
+
+        for (int s = 0; s < stepsPerEpoch; s++)
+        {
+            // 1) Slice out mini-batch from d_trainImages, d_trainLabels
+            //    We assume you have a function that returns pointers to the
+            //    batch in device memory: d_batchImages, d_batchLabels
+            const float *d_batchImages = d_trainImages + (s * batchSize * network->layers[0].inputSize);
+            const float *d_batchLabels = d_trainLabels + (s * batchSize * network->layers[network->numLayers - 1].outputSize);
+
+            // 2) Forward
+            forwardNetwork(network, d_batchImages, /*out=*/nullptr, batchSize);
+
+            // Optionally compute the loss here if you want to measure epochLoss
+
+            // 3) Backward
+            backwardNetwork(network, d_batchLabels, batchSize);
+
+            // 4) Update
+            updateNetworkParameters(network);
+
+            // 5) Free intermediate activations that were allocated in forwardNetwork
+            //    (except the user-provided input pointer)
+            for (int i = 1; i <= network->numLayers; i++)
+            {
+                cudaFree(network->activations[i]);
+            }
+        }
+        printf("Epoch %d done.\n", e);
+    }
+}

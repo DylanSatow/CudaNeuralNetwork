@@ -1,14 +1,4 @@
-#include <cuda_runtime.h>
-#include <device_launch_parameters.h>
-
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <vector>
-#include <string>
-#include <stdexcept>
-
-
+#include "include/data_loader.h"
 
 /**
  * \brief Loads MNIST data from a CSV file and copies it to GPU memory.
