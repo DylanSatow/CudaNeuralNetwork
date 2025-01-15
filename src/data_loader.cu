@@ -66,11 +66,11 @@ void loadMNISTCSV(
         {
             if (!std::getline(ss, token, ','))
             {
-                // If we cannot read enough pixel values, skip/throw
-                throw std::runtime_error(
-                    "Invalid CSV format: expected 784 pixel values, got fewer.");
+                throw std::runtime_error("Invalid CSV format: expected 784 pixel values, got fewer.");
             }
             float pixelValue = std::stof(token);
+            // Normalize to range [0,1] - MNIST pixels are originally [0,255]
+            pixelValue /= 255.0f;
             host_images.push_back(pixelValue);
         }
 

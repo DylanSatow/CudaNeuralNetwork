@@ -133,28 +133,42 @@ int main(int argc, char **argv)
         // 2) Define a simple 3-layer network
         //    (784 -> 128 -> 10)
         // ------------------------------------------------
-        int layerSizes[] = {784, 128, 10};
-        int numLayers = 3; // includes input, hidden, output
-        float learningRate = 0.01f;
+        int layerSizes[] = {784, 512, 10};
+        int numLayers = 3;
+        float learningRate = 0.001f; // Increased from 0.0005f
 
         NeuralNetwork network;
         initNetwork(&network, layerSizes, numLayers, learningRate);
 
-        // ------------------------------------------------
-        // 3) Train: pick a batch size, # epochs
-        // ------------------------------------------------
-        // For simplicity, let's do an entire epoch in
-        // 'steps' of batchSize
-        int batchSize = 128;
-        int epochs = 30;
+        // Training parameters
+        int batchSize = 32; // Decreased from 64
+        int epochs = 20;    // Keep the same
 
-        printf("[main] Starting training for %d epochs, batchSize=%d...\n", epochs, batchSize);
-        trainNetwork(&network,
-                     d_trainImages,
-                     d_trainLabels,
-                     trainSamples,
-                     batchSize,
-                     epochs);
+        printf("[main] Starting training for %d epochs, batchSize=%d...\n",
+               epochs, batchSize);
+
+        // Train and evaluate
+        float bestAccuracy = 0.0f;
+        for (int e = 0; e < epochs; e++)
+        {
+            // Train one epoch
+            float epochLoss = trainNetwork(&network,
+                                           d_trainImages,
+                                           d_trainLabels,
+                                           trainSamples,
+                                           batchSize);
+
+            // Evaluate
+            float trainAcc = evaluateAccuracy(&network,
+                                              d_trainImages,
+                                              d_trainLabels,
+                                              trainSamples,
+                                              batchSize);
+
+            bestAccuracy = fmaxf(bestAccuracy, trainAcc);
+            printf("Epoch %d done. Loss: %.4f, Accuracy: %.2f%% (Best: %.2f%%)\n",
+                   e, epochLoss, trainAcc, bestAccuracy);
+        }
 
         // ------------------------------------------------
         // 4) Evaluate on the same training set (for demo)
