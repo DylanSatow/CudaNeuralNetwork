@@ -146,7 +146,8 @@ Epoch 19: Loss=0.5507, Train Acc=84.48%, Test Acc=84.86%
 
 ## Acknowledgments
 - NVIDIA for CUDA toolkit and documentation
-- SIBOEHM's amazing anthropic blog post on matmul kernels! (https://github.com/siboehm/SGEMM_CUDA/blob/master/src/kernels/10_kernel_warptiling.cuh)\
+- SIBOEHM's amazing anthropic blog post on matmul kernels! (https://github.com/siboehm/SGEMM_CUDA/blob/master/src/kernels/10_kernel_warptiling.cuh)
+- Claude for helping me write this readme (shhhhh)
 
 ## Contact
 For questions or feedback, please open an issue in the repository.
