@@ -32,13 +32,6 @@ This project implements a neural network from scratch using CUDA C++ to classify
 
 ## Prerequisites
 
-### Required Skills
-- Strong C++ programming knowledge
-- Understanding of CUDA programming model
-- Basic Python programming
-- Neural network and deep learning concepts
-- Understanding of parallel computing principles
-
 ### System Requirements
 - NVIDIA GPU with CUDA support
 - CUDA Toolkit 11.0 or higher
@@ -150,4 +143,4 @@ Epoch 19: Loss=0.5507, Train Acc=84.48%, Test Acc=84.86%
 - Claude for helping me write this readme (shhhhh)
 
 ## Contact
-For questions or feedback, please open an issue in the repository.
+For questions or feedback (or to give me a job), please contact me at my email @dms2315@columbia.edu
